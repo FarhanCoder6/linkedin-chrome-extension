@@ -1,0 +1,31 @@
+.save-success {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid #b4dfc4;
+  border-radius: 8px;
+  background: #eefaf2;
+  cursor: pointer;
+}
+
+.save-success-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid #1a6b3a;
+  border-radius: 50%;
+  color: #1a6b3a;
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.save-success-text {
+  color: #1a6b3a;
+  font-size: 13px;
+  font-weight: 600;
+}
