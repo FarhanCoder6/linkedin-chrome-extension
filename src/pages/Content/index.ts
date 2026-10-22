@@ -4,8 +4,9 @@ const ROLE_BADGE_ROW_CLASS = 'linkedin-extension-role-badge-row';
 const ROLE_BADGE_LEFT_CLASS = 'linkedin-extension-role-badge-left';
 const ROLE_BADGE_RIGHT_CLASS = 'linkedin-extension-role-badge-right';
 const FLAG_BADGE_CLASS = 'linkedin-extension-flag-badge';
-const MESSAGE_CARD_SELECTOR = '.msg-conversation-listitem__link';
-const MESSAGE_CARD_CONTAINER_SELECTOR = '.msg-conversation-listitem';
+const MESSAGE_CARD_SELECTOR = '[id^="overlay-conversation-card-"]';
+const MESSAGE_CARD_CONTAINER_SELECTOR = MESSAGE_CARD_SELECTOR;
+const INTEROP_OUTLET_SELECTOR = '#interop-outlet';
 const FLAG_COLORS_STORAGE_KEY = 'linkedin-extension-flag-colors';
 const CARD_TAGS_STORAGE_KEY = 'linkedin-extension-card-tags';
 const DEFAULT_FLAG_COLORS = ['green', 'yellow', 'red'];
@@ -67,24 +68,36 @@ const normalizeFlagColors = (value: unknown) => {
   return unique.size > 0 ? Array.from(unique) : [...DEFAULT_FLAG_COLORS];
 };
 
+type ChromeStorageLocal = {
+  get: (keys: string[], callback: (result: Record<string, unknown>) => void) => void;
+  set: (items: Record<string, unknown>) => void;
+};
+
+const getChromeStorageLocal = () =>
+  (globalThis as typeof globalThis & {
+    chrome?: { storage?: { local?: ChromeStorageLocal } };
+  }).chrome?.storage?.local;
+
 const loadFlagColors = () =>
   new Promise<string[]>((resolve) => {
-    if (!chrome.storage?.local) {
+    const storage = getChromeStorageLocal();
+    if (!storage) {
       resolve([...DEFAULT_FLAG_COLORS]);
       return;
     }
 
-    chrome.storage.local.get([FLAG_COLORS_STORAGE_KEY], (result) => {
+    storage.get([FLAG_COLORS_STORAGE_KEY], (result) => {
       resolve(normalizeFlagColors(result?.[FLAG_COLORS_STORAGE_KEY]));
     });
   });
 
 const saveFlagColors = (colors: string[]) => {
-  if (!chrome.storage?.local) {
+  const storage = getChromeStorageLocal();
+  if (!storage) {
     return;
   }
 
-  chrome.storage.local.set({ [FLAG_COLORS_STORAGE_KEY]: colors });
+  storage.set({ [FLAG_COLORS_STORAGE_KEY]: colors });
 };
 
 const getMessageCardKeyInfo = (
@@ -95,6 +108,9 @@ const getMessageCardKeyInfo = (
   const candidates: string[] = [];
   const root = (messageCard.closest(MESSAGE_CARD_CONTAINER_SELECTOR) || messageCard) as HTMLElement;
   const item = root.closest('li') || root;
+
+  const overlayCardId = root.id.match(/^overlay-conversation-card-(.+)$/)?.[1];
+  if (overlayCardId) pushUnique(candidates, `overlay:${overlayCardId}`);
 
   // 1. Profile Key (The most stable ID)
   // Look in the card, his parents and children
@@ -210,10 +226,12 @@ const resolveMessageCardElement = (element: HTMLElement | null) => {
     return null;
   }
 
-  return (
-    (element.closest(MESSAGE_CARD_SELECTOR) as HTMLElement | null) ||
-    (element.closest(MESSAGE_CARD_CONTAINER_SELECTOR) as HTMLElement | null)
-  );
+  return element.closest(MESSAGE_CARD_SELECTOR) as HTMLElement | null;
+};
+
+const getConversationCards = () => {
+  const shadowRoot = document.querySelector(INTEROP_OUTLET_SELECTOR)?.shadowRoot;
+  return shadowRoot ? Array.from(shadowRoot.querySelectorAll<HTMLElement>(MESSAGE_CARD_SELECTOR)) : [];
 };
 
 const setCardRole = (messageCard: HTMLElement, role: string) => {
@@ -346,7 +364,7 @@ const saveCardTags = (nextTags: Record<string, CardTag>) =>
 
       const merged = { ...cleanedExisting, ...cleanedNext };
 
-      chrome.storage.local.set({ [CARD_TAGS_STORAGE_KEY]: merged }, () => {
+      chrome.storage?.local?.set({ [CARD_TAGS_STORAGE_KEY]: merged }, () => {
         resolve(chrome.runtime.lastError?.message ?? null);
       });
     });
@@ -410,22 +428,17 @@ const applyStoredTagsToVisibleCards = () => {
   const seenCardIds = new Set<string>();
   let matchedTagCount = 0;
   let injectedCount = 0;
-  const cards = Array.from(
-    document.querySelectorAll(`${MESSAGE_CARD_CONTAINER_SELECTOR}, ${MESSAGE_CARD_SELECTOR}`)
-  ) as HTMLElement[];
+  const cards = getConversationCards();
 
   cards.forEach((card) => {
-    const renderTarget = (card.matches(MESSAGE_CARD_SELECTOR)
-      ? card
-      : card.querySelector(MESSAGE_CARD_SELECTOR)) as HTMLElement | null;
-    const resolvedCard = renderTarget ?? card;
+    const resolvedCard = card;
 
     const candidateIds = getMessageCardIdCandidates(resolvedCard);
 
     if (candidateIds.length === 0) return;
 
     // Use a very stable field for the 'seen' check to avoid duplicates while allowing retries
-    const stabilityKey = candidateIds.find(id => id.startsWith('text:') || id.startsWith('profile:')) || candidateIds[0];
+    const stabilityKey = candidateIds.find(id => id.startsWith('overlay:')) || candidateIds.find(id => id.startsWith('profile:')) || candidateIds[0];
     if (seenCardIds.has(stabilityKey)) {
       return;
     }
@@ -440,14 +453,14 @@ const applyStoredTagsToVisibleCards = () => {
     // Fuzzy Match Fallback: If no exact match, try to see if any storage key PARTIALLY matches our text fallback (or vice versa)
     // This is a safety net for lingering corrupted tags like "text:muhammad samad app developer"
     if (!matchedCardId) {
-      const textCandidate = candidateIds.find(id => id.startsWith('text:'));
+      const textCandidate = candidateIds.find(id => id.startsWith('name:') || id.startsWith('text:'));
       if (textCandidate) {
-        const rawTextName = textCandidate.replace('text:', '').trim();
+        const rawTextName = textCandidate.replace(/^(?:name|text):/, '').trim();
         if (rawTextName.length > 5) { // Ensure name is reasonably long to avoid false positives
           const storageKeys = Object.keys(cardTags);
           matchedCardId = storageKeys.find(key => {
-            if (key.startsWith('text:')) {
-              const rawStorageName = key.replace('text:', '').trim();
+            if (key.startsWith('text:') || key.startsWith('name:')) {
+              const rawStorageName = key.replace(/^(?:name|text):/, '').trim();
               // Check if storage key contains visual name, or visual name contains storage key
               if (rawStorageName.includes(rawTextName) || rawTextName.includes(rawStorageName)) {
                 console.log(`[LinkedIn Ext] Fuzzy matched card ${textCandidate} with storage key ${key}`);
@@ -948,14 +961,16 @@ const showRolePopup = (messageCard?: HTMLElement | null) => {
 
 
 document.addEventListener('click', (event) => {
-  const target = event.target as HTMLElement | null;
-  const messageCard = resolveMessageCardElement(target);
+  const path = event.composedPath();
+  const target = path.find((node): node is HTMLElement => node instanceof HTMLElement && node.matches(MESSAGE_CARD_SELECTOR));
+  const messageCard = target || resolveMessageCardElement(event.target as HTMLElement | null);
 
   if (!messageCard) {
     return;
   }
 
   activeMessageCard = messageCard;
+  scheduleApplyStoredTags(0);
 });
 
 chrome.runtime.onMessage.addListener((message) => {
@@ -990,9 +1005,7 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'CLEAR_CARD_TAGS') {
     cardTags = {};
     clearCardTags().then(() => {
-      const cards = Array.from(
-        document.querySelectorAll(`${MESSAGE_CARD_CONTAINER_SELECTOR}, ${MESSAGE_CARD_SELECTOR}`)
-      ) as HTMLElement[];
+      const cards = getConversationCards();
       cards.forEach(removeCardBadges);
 
       chrome.runtime.sendMessage({
@@ -1005,7 +1018,7 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 // ✅ Cross-tab synchronization
-chrome.storage.onChanged.addListener((changes, areaName) => {
+chrome.storage?.onChanged?.addListener((changes, areaName) => {
   if (areaName === 'local' && changes[CARD_TAGS_STORAGE_KEY]) {
     const newVal = normalizeCardTags(changes[CARD_TAGS_STORAGE_KEY].newValue);
     cardTags = { ...cardTags, ...newVal };
@@ -1032,6 +1045,23 @@ observer.observe(document.body, {
   attributes: true,
   attributeFilter: ['class', 'href', 'data-occludable-entity-urn', 'data-entity-urn', 'aria-current']
 });
+
+let observedConversationRoot: ShadowRoot | null = null;
+const observeConversationRoot = () => {
+  const shadowRoot = document.querySelector(INTEROP_OUTLET_SELECTOR)?.shadowRoot;
+  if (!shadowRoot || shadowRoot === observedConversationRoot) return;
+  observedConversationRoot = shadowRoot;
+  observer.observe(shadowRoot, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['id', 'class', 'href', 'data-occludable-entity-urn', 'data-entity-urn', 'aria-current']
+  });
+  scheduleApplyStoredTags(0);
+};
+observeConversationRoot();
+const interopObserver = new MutationObserver(observeConversationRoot);
+interopObserver.observe(document.documentElement, { childList: true, subtree: true });
 
 window.addEventListener(
   'scroll',
