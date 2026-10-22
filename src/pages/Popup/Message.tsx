@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from 'react'
-import './Popup.css'
 
 const Message = () => {
   const [status, setStatus] = useState('')
